@@ -1,0 +1,11 @@
+{
+  "total_apis": 1276,
+  "total_required_parameters": 857,
+  "total_optional_parameters": 26837,
+  "total_output_fields": 52275,
+  "average_required_per_api": 0.67,
+  "average_optional_per_api": 21.03,
+  "average_output_fields_per_api": 40.97,
+  "apis_with_no_required_params": 838,
+  "apis_with_10_plus_params": 398
+}

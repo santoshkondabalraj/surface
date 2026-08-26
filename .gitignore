@@ -1,0 +1,192 @@
+# ============================================================================
+# TASTEMAKER GITIGNORE - Root level (centralized)
+# ============================================================================
+
+# ============================================================================
+# OS & IDE
+# ============================================================================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+.env.local
+.env.*.local
+
+# ============================================================================
+# NODE.JS / FRONTEND (Next.js)
+# ============================================================================
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+.next/
+out/
+build/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ============================================================================
+# PYTHON / MCP_SERVER
+# ============================================================================
+# Python compiled bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+mcp_server/venv/
+mcp_server/.venv/
+
+# pytest, coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ============================================================================
+# ENVIRONMENT & SECRETS
+# ============================================================================
+.env
+.env.local
+.env.*.local
+.env.production.local
+.env.development.local
+.env.test.local
+secrets/
+*.key
+*.pem
+credentials.json
+
+# ============================================================================
+# LOGS & TEMP FILES
+# ============================================================================
+*.log
+*.logs
+tmp/
+temp/
+*.tmp
+*.bak
+*~
+
+# ============================================================================
+# BUILD & DISTRIBUTION
+# ============================================================================
+dist/
+build/
+*.egg-info/
+.eggs/
+.tox/
+
+# ============================================================================
+# DATABASE & CACHE
+# ============================================================================
+*.db
+*.sqlite
+*.sqlite3
+.cache/
+
+# ============================================================================
+# IDE & EDITOR
+# ============================================================================
+.vscode/
+.idea/
+*.iml
+.project
+.classpath
+.c9/
+*.launch
+.settingspath
+.sass-cache
+.prettierignore
+
+# ============================================================================
+# VERCEL (DEPLOYMENT)
+# ============================================================================
+.vercel
+
+# ============================================================================
+# TESTING
+# ============================================================================
+coverage/
+.nyc_output/
+
+# ============================================================================
+# DEPRECATED TOOLS (Local Reference Only)
+# ============================================================================
+# Deprecated tools kept for historical reference; NOT exposed via MCP server
+# See mcp_server/tools/deprecated/README.md for details
+mcp_server/tools/deprecated/
+
+# ============================================================================
+# SESSION NOTES & WORKING DOCUMENTATION
+# ============================================================================
+# These are internal session notes/working documentation created during development
+# They document fixes and improvements but aren't permanent project documentation
+ARCHITECTURE_FIXES.md
+REFINE_TOOL_IMPROVEMENTS_IMPLEMENTED.md
+REGRESSION_FIX_SUMMARY.md
+TOOL_DOCSTRING_IMPROVEMENTS.md
+TOOL_IMPROVEMENTS_SUMMARY.md
+PRODUCTION_SAFETY_PHASE1_2_SUMMARY.md
+PRODUCTION_SAFETY_PHASE3_SUMMARY.md
+PRODUCTION_SAFETY_COMPLETE.md
+PRODUCTION_SAFETY_DELIVERABLES.md
+FINAL_SUMMARY.txt
+
+# ============================================================================
+# OS-SPECIFIC
+# ============================================================================
+.AppleDouble
+.LSOverride
+*.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+# ============================================================================
+# LARGE DATA FILES & GENERATED ASSETS
+# ============================================================================
+# All data files in mcp_server/data/ (generated embeddings, skill chunks, schemas)
+mcp_server/data/
+
+# JSON metadata and mapping files in mcp_server/tools/
+mcp_server/tools/*.json

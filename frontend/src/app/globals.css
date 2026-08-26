@@ -1,0 +1,268 @@
+@import "tailwindcss";
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/* Dark mode support */
+html.dark {
+  color-scheme: dark;
+}
+
+html.dark {
+  --color-surface: #0f172a;
+  --color-surface-raised: #1e293b;
+  --color-surface-overlay: #334155;
+  --color-surface-border: #475569;
+  --color-text-primary: #f1f5f9;
+  --color-text-secondary: #cbd5e1;
+  --color-text-muted: #94a3b8;
+}
+
+@layer utilities {
+  .animate-pulse-slow {
+    animation: pulse-slow 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  .animation-delay-2000 {
+    animation-delay: 2s;
+  }
+  .animation-delay-4000 {
+    animation-delay: 4s;
+  }
+}
+
+@theme inline {
+  --color-surface: #ffffff;
+  --color-surface-raised: #f5f3ef;
+  --color-surface-overlay: #ebe9e3;
+  --color-surface-border: #e5e3dc;
+  --color-accent: #20b2aa;
+  --color-accent-hover: #17958e;
+  --color-text-primary: #09090b;
+  --color-text-secondary: #27272a;
+  --color-text-muted: #71717a;
+  --color-success: #16a34a;
+  --color-error: #dc2626;
+  --color-warning: #d97706;
+  --color-code-bg: #f0efea;
+  --color-pre-bg: #f6f8fa;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+:root {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  font-weight: 450;
+  -webkit-font-smoothing: antialiased;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d0cec8;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #b8b6b0;
+}
+
+/* Prose styles for assistant messages */
+.prose-oms {
+  color: var(--color-text-primary);
+  line-height: 1.75;
+  font-size: 16px;
+  font-weight: 450;
+  letter-spacing: -0.01em;
+}
+.prose-oms p { margin: 0.9em 0; }
+.prose-oms p:first-child { margin-top: 0; }
+.prose-oms p:last-child { margin-bottom: 0; }
+.prose-oms h1, .prose-oms h2, .prose-oms h3, .prose-oms h4 {
+  font-weight: 800;
+  margin: 1.4em 0 0.5em;
+  color: var(--color-text-primary);
+  letter-spacing: -0.03em;
+}
+.prose-oms h1 { font-size: 1.4em; }
+.prose-oms h2 { font-size: 1.2em; }
+.prose-oms h3 { font-size: 1.06em; }
+.prose-oms ul, .prose-oms ol {
+  padding-left: 1.5em;
+  margin: 0.6em 0;
+}
+.prose-oms li { margin: 0.35em 0; }
+.prose-oms code:not(pre code) {
+  background: var(--color-code-bg);
+  padding: 0.15em 0.4em;
+  border-radius: 5px;
+  font-size: 0.85em;
+  font-family: var(--font-geist-mono), monospace;
+  color: var(--color-accent);
+  border: 1px solid var(--color-surface-border);
+}
+.prose-oms pre {
+  background: var(--color-pre-bg);
+  border: 1px solid var(--color-surface-border);
+  border-radius: 12px;
+  overflow-x: auto;
+  margin: 0.85em 0;
+  font-size: 0.875em;
+}
+.prose-oms pre code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+  border: none;
+}
+.prose-oms blockquote {
+  border-left: 2px solid var(--color-accent);
+  padding-left: 1em;
+  margin: 0.85em 0;
+  color: var(--color-text-secondary);
+}
+.prose-oms table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.85em 0;
+  font-size: 0.9em;
+}
+.prose-oms th, .prose-oms td {
+  border: 1px solid var(--color-surface-border);
+  padding: 0.5em 0.85em;
+  text-align: left;
+}
+.prose-oms th {
+  background: var(--color-surface-raised);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  font-size: 0.82em;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.prose-oms hr {
+  border: none;
+  border-top: 1px solid var(--color-surface-border);
+  margin: 1.2em 0;
+}
+.prose-oms a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.prose-oms strong {
+  color: var(--color-text-primary);
+  font-weight: 700;
+}
+
+/* Smooth streaming text rendering - no oscillation */
+.prose-dashboard {
+  min-height: 1.5em; /* Prevent layout shift from empty content */
+  word-break: break-word;
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+/* Line-by-line rendering effect */
+.prose-dashboard p {
+  display: block;
+  position: relative;
+}
+
+/* Lighter reasoning text */
+.reasoning-text {
+  color: var(--color-text-muted);
+  font-style: italic;
+  font-size: 0.9em;
+}
+
+/* Shiki code block overrides */
+.shiki {
+  padding: 1em 1.25em;
+  border-radius: 12px;
+  overflow-x: auto;
+  border: 1px solid var(--color-surface-border);
+}
+
+/* ── Print / PDF export ───────────────────────────────────────────────────── */
+@media print {
+  html, body {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  /* Hide all chrome — sidebar, header, input bar, resource panel */
+  aside,
+  header,
+  [data-noprint] {
+    display: none !important;
+  }
+
+  /* Flatten the app shell so the message list fills the page */
+  .flex.h-full.w-full,
+  .flex.flex-col.flex-1.min-w-0,
+  .flex.flex-1.min-h-0 {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  /* Message list scroll container — let it expand to full content */
+  .flex-1.overflow-y-auto {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+  }
+
+  /* Prose readability in print */
+  .prose-oms {
+    color: #000 !important;
+    font-size: 14px !important;
+  }
+
+  /* Keep code blocks legible */
+  pre, .shiki {
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+    border: 1px solid #ddd !important;
+    background: #f8f8f8 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Avoid breaking tool call blocks across pages */
+  .rounded-xl.border {
+    break-inside: avoid;
+  }
+
+  /* User bubble */
+  .rounded-2xl {
+    break-inside: avoid;
+  }
+}

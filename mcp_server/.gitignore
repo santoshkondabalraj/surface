@@ -1,0 +1,22 @@
+# MCP Server-specific patterns (common patterns handled by root .gitignore)
+# This file extends the root .gitignore with Python/mcp_server specifics
+
+# Python virtual environment (if not using root-level venv/)
+venv/
+.venv/
+
+# Python cache and compiled files (if not caught by root)
+__pycache__/
+*.pyc
+
+# MCP Server-specific
+*.log
+logs/
+
+# Neo4J/KG generated files (if any)
+kg_output/
+kg_cache/
+
+# Local configuration
+config.local.py
+.env.local

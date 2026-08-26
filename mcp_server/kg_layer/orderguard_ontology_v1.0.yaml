@@ -1,0 +1,2329 @@
+version: "1.1.0"
+name: "OrderGuard Exception Ontology"
+database: "Oracle 19c ATP (SSFS118 schema)"
+last_updated: "2025-12-31"
+coverage_target: "8 implemented exception types (confirmShipment validations)"
+status: "PRODUCTION"
+
+# ============================================
+# METADATA
+# ============================================
+metadata:
+  description: |
+    Ontology defining the structure, relationships, business rules, and state machines
+    for OrderGuard exception analysis and RCA generation.
+    
+    This ontology is used by:
+    1. DeepSeek model for SQL generation
+    2. LangGraph agent for RCA workflow orchestration
+    3. SQL validator for query validation
+    4. RCA generator for context enrichment
+  
+  system_architecture:
+    description: "OrderGuard operates within a multi-system environment"
+    
+    systems:
+      OMS:
+        name: "IBM Sterling Order Management System"
+        role: "Order orchestration, inventory management, order lifecycle"
+        database: "Oracle 19c ATP (SSFS118 schema)"
+        exception_table: "YFS_REPROCESS_ERROR"
+        key_tables: [yfs_order_header, yfs_order_line, yfs_order_release, yfs_shipment]
+        
+      WMS:
+        name: "Warehouse Management System (External)"
+        role: "Physical fulfillment - pick, pack, ship"
+        integration: "Sends confirmShipment messages to OMS after physical shipment"
+        note: "WMS data not directly accessible - only see messages in YFS_REPROCESS_ERROR.MESSAGE"
+    
+    integration_flow:
+      order_to_shipment:
+        step1:
+          system: OMS
+          action: "Order created, payment authorized, inventory allocated"
+          api: "createOrder"
+        
+        step2:
+          system: OMS
+          action: "Order released for fulfillment"
+          api: "releaseOrder"
+          prerequisite: "Payment status = AUTHORIZED (BR001)"
+          result: "Release message sent to WMS"
+        
+        step3:
+          system: WMS
+          action: "WMS receives release, picks items, packs into containers, ships physically"
+          note: "WMS operations not visible in OMS database"
+        
+        step4:
+          system: "WMS → OMS"
+          action: "WMS sends confirmShipment message to OMS"
+          message_content: "Containers, tracking numbers, quantities shipped"
+          note: "This is the INBOUND message that gets validated"
+        
+        step5:
+          system: OMS
+          action: "OMS validates confirmShipment message"
+          validation:
+            - "Shipment exists in yfs_shipment"
+            - "Container data is valid"
+            - "Quantities match"
+            - "Order state allows confirmation"
+          on_success: "Update shipment status to 1400 (SHIPPED), create containers"
+          on_failure: "Log exception to YFS_REPROCESS_ERROR"
+    
+    exception_context:
+      yfs_reprocess_error_captures: "INBOUND messages from WMS that failed OMS validation"
+      
+      critical_understanding: |
+        If confirmShipment exception exists in YFS_REPROCESS_ERROR:
+        ✅ Order was ALREADY released (releaseOrder succeeded)
+        ✅ WMS ALREADY physically shipped the product
+        ❌ OMS rejected WMS's confirmation message
+        
+        Therefore:
+        - BR001 (payment prerequisite) was satisfied BEFORE release
+        - BR002 (release prerequisite) was satisfied BEFORE shipment
+        - Exception is NOT blocking shipment (shipment already left warehouse)
+        - Exception is blocking OMS visibility/tracking of the shipment
+      
+      business_impact: |
+        - Physical product is in transit (customer will receive it)
+        - OMS does not know shipment status (tracking blind spot)
+        - Customer cannot track shipment in OMS
+        - Reporting shows order as "not shipped" even though it is
+        - Critical: Data sync issue between WMS and OMS
+  
+  version_history:
+    v1.0.0:
+      date: "2025-12-28"
+      known_exception_types: 6
+      business_rules: 5
+      entities: 8
+      coverage_estimate: "60%"
+      notes: "Initial production release - partial exception type coverage"
+    
+    v1.1.0:
+      date: "2025-12-31"
+      known_exception_types: 8
+      business_rules: 5
+      entities: 8
+      coverage_estimate: "100% of implemented validations"
+      notes: "Updated to match actual implementation - all 8 confirmShipment error types documented"
+      changes:
+        - "Added all 8 implemented error types with correct codes"
+        - "Fixed YDM00129 mapping (Shipment Already Confirmed, not No Releasable Quantity)"
+        - "Updated BR003 to reflect actual validation logic"
+        - "Added validation precedence rules"
+        - "Added error-specific RCA guidance"
+  
+  evolution_strategy: |
+    This ontology follows 80/20 principle:
+    - v1.0: Top 10 exception types (75% coverage)
+    - v1.1: Add 5 more types based on UNCLASSIFIED patterns (85% coverage)
+    - v2.0: Add 10 more types (95% coverage)
+    - v3.0: Stable taxonomy
+    
+    New rules are added when:
+    1. UNCLASSIFIED exception pattern appears >50 times
+    2. New business rule discovered during RCA analysis
+    3. User reports missing validation
+  
+  extension_points:
+    - exception_types.known_types: "Add new exception type definitions"
+    - business_rules: "Add new validation rules"
+    - state_machines: "Add new entity state machines"
+    - entities: "Add new tables as needed"
+
+# ============================================
+# ENTITIES - Order Lifecycle
+# ============================================
+
+entities:
+  
+  # ============================================
+  # Order (YFS_ORDER_HEADER)
+  # ============================================
+  Order:
+    table: yfs_order_header
+    schema: ssfs118
+    primary_key: order_header_key
+    business_key: order_no
+    description: "Customer order - root entity in order lifecycle"
+    lifecycle_stage: 1
+    lifecycle_flow: "Order → OrderLine → OrderRelease → Shipment"
+    
+    attributes:
+      order_header_key:
+        type: char(24)
+        description: "Primary key"
+        required: true
+      
+      order_no:
+        type: varchar2(40)
+        description: "Business key - visible to customers"
+        indexed: true
+        required: true
+        pattern: "^EO\\d{10}$"
+      
+      enterprise_key:
+        type: varchar2(40)
+        description: "Tenant identifier - MUST be filtered in all queries"
+        required: true
+        security_critical: true
+        default_value: "Enterprise"
+      
+      order_date:
+        type: timestamp
+        description: "When order was placed"
+      
+      customer_emailid:
+        type: varchar2(150)
+        description: "Customer contact email"
+      
+      customer_phone_no:
+        type: varchar2(40)
+        description: "Customer phone"
+      
+      customer_zip_code:
+        type: varchar2(20)
+        description: "Customer zip code"
+      
+      payment_status:
+        type: varchar2(40)
+        description: "Payment state - critical for release eligibility"
+        enum: [AUTHORIZED, SETTLED, PENDING, FAILED]
+        state_machine: true
+      
+      order_type:
+        type: varchar2(40)
+        description: "Order classification"
+      
+      document_type:
+        type: varchar2(40)
+        description: "Order document type"
+        default: "0001"
+      
+      total_amount:
+        type: number
+        description: "Total order value"
+    
+    relationships:
+      has_lines:
+        target: OrderLine
+        cardinality: "1:N"
+        join_key: order_header_key
+        description: "Order contains one or more order lines (items)"
+        business_rule: "Order cannot ship without lines"
+        example_query: |
+          SELECT ol.* 
+          FROM yfs_order_header o
+          JOIN yfs_order_line ol ON o.order_header_key = ol.order_header_key
+          WHERE o.order_no = :order_no 
+            AND o.enterprise_key = :enterprise_key
+      
+      has_releases:
+        target: OrderRelease
+        cardinality: "1:N"
+        join_key: order_header_key
+        description: "Order can have multiple releases (shipment schedules)"
+        business_rule: "Each release groups lines for shipment"
+        example_query: |
+          SELECT orel.* 
+          FROM yfs_order_header o
+          JOIN yfs_order_release orel ON o.order_header_key = orel.order_header_key
+          WHERE o.order_no = :order_no 
+            AND o.enterprise_key = :enterprise_key
+      
+      has_shipments:
+        target: Shipment
+        cardinality: "1:N"
+        via: yfs_shipment_line
+        description: "Order items are shipped via shipments"
+        traversal_path: "Order → OrderLine → ShipmentLine → Shipment"
+        example_query: |
+          SELECT DISTINCT s.* 
+          FROM yfs_order_header o
+          JOIN yfs_shipment_line sl ON o.order_header_key = sl.order_header_key
+          JOIN yfs_shipment s ON sl.shipment_key = s.shipment_key
+          WHERE o.order_no = :order_no 
+            AND o.enterprise_key = :enterprise_key
+  
+  # ============================================
+  # OrderLine (YFS_ORDER_LINE)
+  # ============================================
+  OrderLine:
+    table: yfs_order_line
+    schema: ssfs118
+    primary_key: order_line_key
+    description: "Individual item within an order"
+    lifecycle_stage: 2
+    business_context: "Represents WHAT customer ordered (item + quantity)"
+    
+    attributes:
+      order_line_key:
+        type: char(24)
+        required: true
+      
+      order_header_key:
+        type: char(24)
+        foreign_key: yfs_order_header.order_header_key
+        required: true
+      
+      prime_line_no:
+        type: integer
+        description: "Line number visible to customer"
+        required: true
+      
+      sub_line_no:
+        type: integer
+        description: "Sub-line for kit items or bundles"
+        default: 1
+      
+      item_id:
+        type: varchar2(40)
+        description: "Product SKU"
+        required: true
+      
+      item_desc:
+        type: varchar2(500)
+        description: "Product description"
+      
+      ordered_qty:
+        type: number
+        description: "Quantity ordered by customer"
+        required: true
+        constraint: "> 0"
+      
+      unit_price:
+        type: number
+        description: "Price per unit"
+      
+      uom:
+        type: varchar2(10)
+        description: "Unit of measure (e.g., EACH, BOX)"
+      
+      line_type:
+        type: varchar2(40)
+        description: "Line classification"
+    
+    relationships:
+      belongs_to_order:
+        target: Order
+        cardinality: "N:1"
+        join_key: order_header_key
+        description: "Each line belongs to exactly one order"
+      
+      allocated_to_release:
+        target: OrderRelease
+        cardinality: "N:1"
+        join_key: order_release_key
+        description: "Line quantity is allocated to a release for shipping"
+        business_rule: "BR002: Line must be released before it can ship"
+      
+      fulfilled_by_shipment_lines:
+        target: ShipmentLine
+        cardinality: "1:N"
+        join_key: order_line_key
+        description: "Order line can be split across multiple shipments"
+  
+  # ============================================
+  # OrderRelease (YFS_ORDER_RELEASE)
+  # ============================================
+  OrderRelease:
+    table: yfs_order_release
+    schema: ssfs118
+    primary_key: order_release_key
+    description: "Shipment schedule for order lines"
+    lifecycle_stage: 3
+    business_context: "Groups order lines by WHEN and WHERE they will ship"
+    
+    attributes:
+      order_release_key:
+        type: char(24)
+        required: true
+      
+      order_header_key:
+        type: char(24)
+        foreign_key: yfs_order_header.order_header_key
+        required: true
+      
+      order_line_key:
+        type: char(24)
+        foreign_key: yfs_order_line.order_line_key
+      
+      release_no:
+        type: integer
+        description: "Release sequence number (1, 2, 3...)"
+      
+      shipnode_key:
+        type: char(24)
+        description: "Warehouse/ship node for this release"
+      
+      req_ship_date:
+        type: timestamp
+        description: "Requested ship date"
+      
+      req_delivery_date:
+        type: timestamp
+        description: "Requested delivery date"
+      
+      status:
+        type: varchar2(40)
+        description: "Release lifecycle status"
+        enum: [CREATED, RELEASED, SCHEDULED, SHIPPED, DELIVERED, BACKORDERED, CANCELLED]
+        state_machine: true
+    
+    relationships:
+      belongs_to_order:
+        target: Order
+        cardinality: "N:1"
+        join_key: order_header_key
+      
+      releases_line:
+        target: OrderLine
+        cardinality: "N:1"
+        join_key: order_line_key
+        description: "Release allocates quantity from an order line"
+  
+  # ============================================
+  # Shipment (YFS_SHIPMENT)
+  # ============================================
+  Shipment:
+    table: yfs_shipment
+    schema: ssfs118
+    primary_key: shipment_key
+    business_key: shipment_no
+    description: "Physical shipment of goods to customer"
+    lifecycle_stage: 4
+    business_context: "Represents the actual package being sent"
+    
+    attributes:
+      shipment_key:
+        type: char(24)
+        required: true
+      
+      shipment_no:
+        type: varchar2(40)
+        description: "Tracking identifier for shipment"
+        note: "May be CHAR with padding - always use TRIM()"
+        pattern: "^SHIP\\d{13}$"
+        required: true
+      
+      order_header_key:
+        type: char(24)
+        foreign_key: yfs_order_header.order_header_key
+      
+      scac:
+        type: char(24)
+        description: "Carrier code (e.g., FXFE for FedEx)"
+      
+      carrier_service_code:
+        type: varchar2(40)
+        description: "Service level (e.g., GROUND, EXPRESS)"
+      
+      origin_port:
+        type: varchar2(40)
+        description: "Ship from location"
+      
+      dest_port:
+        type: varchar2(40)
+        description: "Ship to location"
+      
+      ship_date:
+        type: date
+        description: "When shipment left origin"
+      
+      actual_shipment_date:
+        type: date
+        description: "Actual ship date"
+      
+      status:
+        type: char(15)
+        description: "Shipment status code"
+        enum: ["1100", "1400", "9000"]
+        state_machine: true
+        value_meanings:
+          "1100": "CREATED - Shipment created, not yet confirmed"
+          "1400": "SHIPPED - Shipment confirmed and shipped"
+          "9000": "DELIVERED - Shipment delivered to customer"
+    
+    relationships:
+      belongs_to_order:
+        target: Order
+        cardinality: "N:1"
+        join_key: order_header_key
+      
+      has_lines:
+        target: ShipmentLine
+        cardinality: "1:N"
+        join_key: shipment_key
+        description: "Shipment contains multiple items (shipment lines)"
+        business_rule: "BR003: Shipment must have at least one line"
+      
+      has_containers:
+        target: ShipmentContainer
+        cardinality: "1:N"
+        join_key: shipment_key
+        description: "Shipment is packed into physical containers/boxes"
+        business_rule: "BR003: confirmShipment requires at least one container"
+  
+  # ============================================
+  # ShipmentLine (YFS_SHIPMENT_LINE)
+  # ============================================
+  ShipmentLine:
+    table: yfs_shipment_line
+    schema: ssfs118
+    primary_key: shipment_line_key
+    description: "Item within a shipment (links order line to shipment)"
+    business_context: "BRIDGE entity connecting orders to shipments"
+    
+    attributes:
+      shipment_line_key:
+        type: char(24)
+        required: true
+      
+      shipment_key:
+        type: char(24)
+        foreign_key: yfs_shipment.shipment_key
+        required: true
+      
+      order_header_key:
+        type: char(24)
+        foreign_key: yfs_order_header.order_header_key
+      
+      order_line_key:
+        type: char(24)
+        foreign_key: yfs_order_line.order_line_key
+        required: true
+      
+      order_release_key:
+        type: char(24)
+        foreign_key: yfs_order_release.order_release_key
+        description: "Links line to specific release"
+      
+      quantity:
+        type: number
+        description: "Quantity shipped on this shipment line"
+        required: true
+        constraint: "> 0"
+      
+      item_id:
+        type: varchar2(40)
+        description: "Product SKU (denormalized from order line)"
+    
+    relationships:
+      belongs_to_shipment:
+        target: Shipment
+        cardinality: "N:1"
+        join_key: shipment_key
+      
+      fulfills_order_line:
+        target: OrderLine
+        cardinality: "N:1"
+        join_key: order_line_key
+      
+      fulfills_release:
+        target: OrderRelease
+        cardinality: "N:1"
+        join_key: order_release_key
+      
+      shipped_via_containers:
+        target: ShipmentContainer
+        cardinality: "N:N"
+        physical_fk: false
+        description: "LOGICAL relationship only - no direct FK in database"
+        note: |
+          Lines and Containers are related through Shipment, not directly.
+          In WMS message, ShipmentLines may be nested under Container (logical grouping),
+          but in database, they are separate tables both linked to shipment_key.
+  
+  # ============================================
+  # ShipmentContainer (YFS_SHIPMENT_CONTAINER)
+  # ============================================
+  ShipmentContainer:
+    table: yfs_shipment_container
+    schema: ssfs118
+    primary_key: shipment_container_key
+    description: "Physical box/package within a shipment"
+    business_context: "Captures tracking numbers and carrier service details during confirmShipment"
+    
+    attributes:
+      shipment_container_key:
+        type: char(24)
+        required: true
+      
+      shipment_key:
+        type: char(24)
+        foreign_key: yfs_shipment.shipment_key
+        required: true
+      
+      order_header_key:
+        type: char(24)
+        foreign_key: yfs_order_header.order_header_key
+      
+      order_release_key:
+        type: char(24)
+        foreign_key: yfs_order_release.order_release_key
+        description: "Links container to specific release"
+      
+      container_no:
+        type: varchar2(40)
+        description: "Container identifier"
+        required: true
+      
+      tracking_no:
+        type: varchar2(40)
+        description: "Carrier tracking number from WMS"
+        note: "Primary purpose of container record - enables customer tracking"
+      
+      container_gross_weight:
+        type: number
+        description: "Weight of container"
+      
+      container_scm:
+        type: varchar2(40)
+        description: "Shipping Container Mark"
+      
+      scac:
+        type: char(24)
+        description: "Carrier code (may be denormalized from shipment)"
+      
+      carrier_service_code:
+        type: varchar2(40)
+        description: "Service level (may be denormalized from shipment)"
+    
+    relationships:
+      belongs_to_shipment:
+        target: Shipment
+        cardinality: "N:1"
+        join_key: shipment_key
+      
+      belongs_to_release:
+        target: OrderRelease
+        cardinality: "N:1"
+        join_key: order_release_key
+      
+      contains_lines:
+        target: ShipmentLine
+        cardinality: "N:N"
+        physical_fk: false
+        description: "LOGICAL relationship only - no direct FK in database"
+        note: |
+          Containers and Lines are related through Shipment, not directly.
+          
+          To find lines in a container, query:
+          SELECT sl.* 
+          FROM yfs_shipment_container sc
+          JOIN yfs_shipment_line sl ON sc.shipment_key = sl.shipment_key
+          WHERE sc.shipment_container_key = :container_key
+          
+          In WMS confirmShipment message, ShipmentLines may be nested under Container
+          (logical grouping showing which items are in which box), but database does
+          not enforce this relationship via FK.
+  
+  # ============================================
+  # Exception (YFS_REPROCESS_ERROR)
+  # ============================================
+  Exception:
+    table: yfs_reprocess_error
+    schema: ssfs118
+    primary_key: errortxnid
+    description: "IBM Sterling exception records from Integration Server"
+    
+    attributes:
+      errortxnid:
+        type: char(40)
+        description: "Primary key for exception"
+        required: true
+      
+      flow_name:
+        type: varchar2(128)
+        description: "Service that failed (e.g., 'confirmShipment', 'createOrder')"
+        used_for: classification
+      
+      sub_flow_name:
+        type: varchar2(128)
+        description: "Sub flow or RuntimeID"
+      
+      errorcode:
+        type: varchar2(128)
+        description: "IBM Sterling error code"
+        optional: true
+        reference_table: yfs_error_code
+      
+      errorstring:
+        type: varchar2(2048)
+        description: "User-friendly error description"
+        required: true
+        used_for: classification_and_similarity_search
+      
+      errormessage:
+        type: varchar2(4000)
+        description: "Complete error message with stack trace"
+        used_for: technical_debugging
+      
+      message:
+        type: clob
+        description: "Input XML/JSON that caused the error"
+        extraction_patterns:
+          json:
+            format: '{"Shipment": {"OrderNo": "EO01...", "EnterpriseCode": "PLANTRIX_EU"}}'
+            paths:
+              - "$.Shipment.OrderNo"
+              - "$.Shipment.ReleaseNo"
+              - "$.Shipment.EnterpriseCode"
+              - "$.Order.OrderNo"
+              - "$.Order.EnterpriseCode"
+          xml:
+            format: '<Shipment OrderNo="EO01..." EnterpriseCode="PLANTRIX_EU"/>'
+            note: "May contain XML format - use XPath for extraction"
+      
+      exception_group_name:
+        type: varchar2(40)
+        description: "Exception category"
+        used_for: initial_classification
+        examples: [InputValidation, ShipmentConfirmation, PaymentAuthorization]
+      
+      exception_group_id:
+        type: varchar2(40)
+        description: "System-generated unique identifier for exception group"
+      
+      exception_id:
+        type: varchar2(40)
+        description: "Links to YFS_INBOX (alert/notification table)"
+        foreign_key: yfs_inbox.inbox_key
+      
+      parent_txn_id:
+        type: char(40)
+        description: "Groups related exceptions together"
+      
+      error_reference:
+        type: varchar2(2048)
+        description: "Freeform name/value pairs for filtering"
+        extraction_patterns:
+          - pattern: "^EO\\d{10}$"
+            type: order_no
+          - pattern: "^SHIP\\d{13}$"
+            type: shipment_no
+      
+      state:
+        type: varchar2(40)
+        description: "Exception lifecycle state"
+        enum: [Initial, Saved, Modified, Fixed, Ignore]
+        filter_rule: "Only process exceptions in 'Initial' or 'Saved' state for RCA"
+      
+      createts:
+        type: datetime
+        description: "When exception was created"
+      
+      modifyts:
+        type: datetime
+        description: "When exception was last modified"
+    
+    logical_relationships:
+      links_to_alert:
+        target: YFS_INBOX
+        physical_fk: true
+        join_key: exception_id
+        description: "Each exception creates an alert/notification"
+      
+      affects_order:
+        target: Order
+        physical_fk: false
+        extraction_strategy: |
+          1. Parse MESSAGE CLOB (JSON or XML)
+          2. Extract OrderNo using JSONPath or XPath
+          3. Extract EnterpriseCode and map to enterprise_key
+          4. JOIN to yfs_order_header
+        
+        enterprise_code_mapping:
+          PLANTRIX_EU: "Enterprise"
+          # Add more mappings as discovered from data
+        
+        example_query: |
+          SELECT o.*
+          FROM yfs_reprocess_error e
+          CROSS JOIN yfs_order_header o
+          WHERE e.errortxnid = :exception_id
+            AND o.order_no = JSON_VALUE(e.message, '$.Shipment.OrderNo')
+            AND o.enterprise_key = 'Enterprise'
+      
+      affects_shipment:
+        target: Shipment
+        physical_fk: false
+        extraction_strategy: |
+          Strategy 1: Direct reference in ERROR_REFERENCE
+            - Check if ERROR_REFERENCE matches pattern SHIP\\d{13}
+            - Use TRIM(shipment_no) = ERROR_REFERENCE
+          
+          Strategy 2: Via Order (if no direct shipment reference)
+            - Extract OrderNo from MESSAGE
+            - Find shipments via order_header_key → shipment_line → shipment
+        
+        example_queries:
+          direct: |
+            SELECT s.*
+            FROM yfs_reprocess_error e
+            CROSS JOIN yfs_shipment s
+            WHERE e.errortxnid = :exception_id
+              AND TRIM(s.shipment_no) = e.error_reference
+          
+          via_order: |
+            SELECT s.*
+            FROM yfs_reprocess_error e
+            CROSS JOIN yfs_order_header o
+            JOIN yfs_shipment_line sl ON o.order_header_key = sl.order_header_key
+            JOIN yfs_shipment s ON sl.shipment_key = s.shipment_key
+            WHERE e.errortxnid = :exception_id
+              AND o.order_no = JSON_VALUE(e.message, '$.Shipment.OrderNo')
+              AND o.enterprise_key = 'Enterprise'
+      
+      caused_by:
+        target: Exception
+        physical_fk: false
+        description: "Causal inference - not physically stored"
+        inference_strategy: |
+          Find related exceptions by:
+          1. Temporal proximity (within 1 hour)
+          2. Shared references (same order_no, shipment_no)
+          3. Exception type patterns
+        
+        max_depth: 3
+        time_window: "1 hour"
+        
+        example_query: |
+          SELECT e2.errortxnid, e2.flow_name, e2.errorstring,
+                 (CAST(e1.createts AS DATE) - CAST(e2.createts AS DATE)) * 24 * 60 as time_diff_minutes
+          FROM yfs_reprocess_error e1
+          JOIN yfs_reprocess_error e2 
+            ON e1.error_reference = e2.error_reference
+            AND e1.errortxnid != e2.errortxnid
+            AND e2.createts < e1.createts
+            AND e2.createts >= e1.createts - INTERVAL '1' HOUR
+          WHERE e1.errortxnid = :exception_id
+          ORDER BY e2.createts DESC
+
+# ============================================
+# BUSINESS RULES
+# ============================================
+
+business_rules:
+  
+  BR001_release_payment_prerequisite:
+    id: "BR001"
+    name: "Order Release Payment Prerequisite"
+    category: "Order Lifecycle Gate"
+    statement: "Order cannot be RELEASED unless payment_status IN ('AUTHORIZED', 'SETTLED')"
+    severity: critical
+    blocking: true
+    applies_to_flows: [releaseOrder, createOrder]
+    does_not_block: [confirmShipment]
+    
+    note: |
+      IMPORTANT: If confirmShipment exception exists, this rule was ALREADY satisfied
+      (release must have succeeded for WMS to ship). Check payment_status to understand
+      historical state, not to diagnose current blockage.
+    
+    validation_query: |
+      SELECT 
+        o.order_no,
+        o.payment_status,
+        CASE 
+          WHEN o.payment_status IN ('AUTHORIZED', 'SETTLED') THEN 'OK'
+          ELSE 'BLOCKED - Payment not authorized'
+        END as release_eligibility
+      FROM yfs_order_header o
+      WHERE o.order_no = :order_no
+        AND o.enterprise_key = :enterprise_key
+    
+    exception_indicators:
+      - errorcode: "YFS00001"
+        errorstring_pattern: "payment not authorized"
+        flow_name: "releaseOrder"
+      - errorcode: "PAYMENT_AUTH_FAILED"
+        flow_name: "createOrder"
+      - exception_group_name: "PaymentAuthorization"
+    
+    remediation:
+      - "Retry payment authorization with updated payment method"
+      - "Contact customer for alternate payment"
+      - "If B2B order, verify credit limit"
+    
+    rca_template: |
+      ## Payment Status Check (BR001)
+      - Current payment status: {payment_status}
+      - Required for release: AUTHORIZED or SETTLED
+      
+      {if flow_name == 'releaseOrder'}
+      - **Root Cause**: Order release blocked due to payment authorization failure
+      - **Business Rule Violated**: BR001 - Order Release Payment Prerequisite
+      {elif flow_name == 'confirmShipment'}
+      - **Historical Context**: Payment was authorized when release occurred
+      - **Note**: This is not the cause of confirmShipment failure (release already succeeded)
+      {endif}
+  
+  BR002_shipment_release_prerequisite:
+    id: "BR002"
+    name: "Shipment Release Prerequisite"
+    category: "Order Lifecycle Gate"
+    statement: "Order line cannot be SHIPPED unless it has been RELEASED (order_release_key IS NOT NULL AND status = 'RELEASED')"
+    severity: critical
+    blocking: true
+    applies_to_flows: [createShipment, releaseOrder]
+    does_not_block: [confirmShipment]
+    
+    note: |
+      IMPORTANT: If confirmShipment exception exists, this rule was ALREADY satisfied
+      (WMS received release and physically shipped). Check release status to understand
+      historical state and verify data integrity, not to diagnose current blockage.
+    
+    validation_query: |
+      SELECT 
+        ol.prime_line_no,
+        ol.item_id,
+        ol.ordered_qty,
+        orel.order_release_key,
+        orel.status as release_status,
+        CASE 
+          WHEN orel.order_release_key IS NOT NULL AND orel.status IN ('RELEASED', 'SCHEDULED', 'SHIPPED') THEN 'OK'
+          WHEN orel.order_release_key IS NULL THEN 'DATA ISSUE - Not released (but WMS shipped anyway?)'
+          ELSE 'DATA ISSUE - Release status unexpected'
+        END as ship_eligibility
+      FROM yfs_order_header o
+      JOIN yfs_order_line ol ON o.order_header_key = ol.order_header_key
+      LEFT JOIN yfs_order_release orel ON ol.order_line_key = orel.order_line_key
+      WHERE o.order_no = :order_no
+        AND o.enterprise_key = :enterprise_key
+    
+    exception_indicators:
+      - errorcode: "YFS00002"
+        errorstring_pattern: "not released"
+        flow_name: "createShipment"
+      - errorcode: "YDM00129"
+        errorstring_pattern: "No releasable quantity"
+        flow_name: "createShipment"
+    
+    remediation:
+      - "Check payment_status on order (must be AUTHORIZED per BR001)"
+      - "Check inventory availability"
+      - "Manually release order via releaseOrder API"
+    
+    rca_template: |
+      ## Release Status Check (BR002)
+      {line_status_table}
+      
+      {if flow_name == 'createShipment'}
+      - **Root Cause**: Order lines are not released - cannot create shipment
+      - **Business Rule Violated**: BR002 - Shipment Release Prerequisite
+      {elif flow_name == 'confirmShipment'}
+      - **Historical Context**: Lines were released when WMS received release message
+      - **Data Integrity Check**: Verifying release state matches expected shipment
+      - **Note**: WMS already physically shipped - this is a data sync issue, not a blocking issue
+      {endif}
+  
+  BR003_confirm_shipment_message_validation:
+    id: "BR003"
+    name: "confirmShipment Message Validation"
+    category: "Integration Message Validation"
+    statement: "confirmShipment message from WMS must contain valid shipment reference, Containers element with valid structure, container identifiers, and quantities that match OMS expectations"
+    severity: critical
+    blocking: true
+    applies_to_flows: [confirmShipment]
+    
+    note: |
+      CRITICAL CONTEXT: This validation happens on INBOUND message from WMS.
+      - WMS has already physically shipped the product
+      - OMS is validating WMS's confirmation message
+      - Failure means OMS cannot update shipment status (data sync issue)
+      - Product is already in transit to customer
+      
+      VALIDATION ORDER (as implemented in confirm_shipment_service.py):
+      1. YDM00129 - Shipment already confirmed (checked first)
+      2. YDM00065 - OrderNo required
+      3. YDM00017 - Order/Shipment not found
+      4. YFS10287 - Containers element missing
+      5. YDM00072 - Container structure invalid
+      6. YDM00066 - ContainerNo missing
+      7. YFS10282 - Quantity zero
+      8. YCD00067 - Quantity exceeds ordered
+      9. YFSI10000 - Invalid item
+    
+    validation_checks:
+      check1_shipment_already_confirmed:
+        statement: "Shipment must not already be in status 1400 (SHIPPED)"
+        error_code: "YDM00129"
+        failure_symptom: "Shipment already confirmed: {shipment_no}"
+        likely_cause: "Duplicate WMS message OR WMS not tracking confirmation status"
+        validation_order: 1
+      
+      check2_order_exists:
+        statement: "OrderNo in message must exist in yfs_order_header"
+        error_code: "YDM00017"
+        failure_symptom: "Order not found: {order_no}"
+        likely_cause: "WMS using wrong OrderNo OR order was deleted in OMS"
+        validation_order: 3
+      
+      check3_containers_element_present:
+        statement: "Containers element must exist and not be null"
+        error_code: "YFS10287"
+        failure_symptom: "No Carton Header Record(ShipmentContainer) for the shipment"
+        likely_cause: "WMS message missing Containers element OR Containers is null"
+        validation_order: 4
+        note: "Must check BEFORE accessing shipment_data['Containers'] to avoid KeyError"
+      
+      check4_containers_structure_valid:
+        statement: "Containers must be dict with 'Container' key"
+        error_code: "YDM00072"
+        failure_symptom: "Shipment Container element is invalid"
+        likely_cause: "WMS sent wrong structure (array instead of dict, missing Container key)"
+        validation_order: 5
+      
+      check5_container_identifier_present:
+        statement: "Each Container must have ContainerNo OR ShipmentContainerKey"
+        error_code: "YDM00066"
+        failure_symptom: "Either ContainerNo or ShipmentContainerKey is mandatory"
+        likely_cause: "WMS not generating container identifiers OR field missing in message"
+        validation_order: 6
+      
+      check6_quantity_not_zero:
+        statement: "ShipmentLine quantity must not be zero"
+        error_code: "YFS10282"
+        failure_symptom: "Shipped Quantity Zero for OrderLineKey: {order_line_key}"
+        likely_cause: "WMS sent zero quantity OR quantity field missing/corrupted"
+        validation_order: 7
+        note: "Checked BEFORE negative quantity check (YDM00120)"
+      
+      check7_quantity_not_exceed_ordered:
+        statement: "ShipmentLine quantity must not exceed OrderLine.ordered_qty"
+        error_code: "YCD00067"
+        failure_symptom: "Picked Quantity ({quantity}) exceeds Ordered Quantity ({ordered_qty})"
+        likely_cause: "WMS picked more than ordered OR order quantity reduced after release"
+        validation_order: 9
+        note: "Must retrieve order_line first (variable scoping requirement)"
+      
+      check8_item_valid_for_shipnode:
+        statement: "ItemID in payload (if different from order) must exist in yfs_item"
+        error_code: "YFSI10000"
+        failure_symptom: "Invalid Item For Ship Node: ItemID {item_id} not found in system"
+        likely_cause: "WMS picked wrong item OR item master out of sync"
+        validation_order: 10
+        note: "Only validates if payload ItemID differs from OrderLine.item_id"
+    
+    validation_query: |
+      -- Check if shipment exists and is in valid state for confirmation
+      SELECT 
+        s.shipment_no,
+        s.status,
+        COUNT(DISTINCT sl.shipment_line_key) as line_count_in_oms,
+        COUNT(DISTINCT sc.shipment_container_key) as container_count_in_oms,
+        CASE 
+          WHEN s.status = '1400' THEN 'ALREADY CONFIRMED - Duplicate message (YDM00129)'
+          WHEN s.status = '9000' THEN 'ALREADY DELIVERED - Late message'
+          WHEN COUNT(DISTINCT sl.shipment_line_key) = 0 THEN 'DATA ISSUE - No lines in OMS (but WMS shipped?)'
+          WHEN s.status = '1100' THEN 'OK - Ready for confirmation'
+          ELSE 'UNEXPECTED STATE'
+        END as oms_validation_status
+      FROM yfs_shipment s
+      LEFT JOIN yfs_shipment_line sl ON s.shipment_key = sl.shipment_key
+      LEFT JOIN yfs_shipment_container sc ON s.shipment_key = sc.shipment_key
+      WHERE TRIM(s.shipment_no) = :shipment_no
+      GROUP BY s.shipment_no, s.status
+    
+    exception_indicators:
+      - errorcode: "YDM00129"
+        errorstring_pattern: "Shipment already confirmed"
+        root_cause: "Duplicate WMS message OR shipment already processed"
+        validation_order: 1
+      
+      - errorcode: "YFS10287"
+        errorstring: "No Carton Header Record(ShipmentContainer) for the shipment"
+        root_cause: "WMS message missing Containers element OR Containers is null"
+        validation_order: 4
+      
+      - errorcode: "YDM00072"
+        errorstring: "Shipment Container element is invalid"
+        root_cause: "WMS sent invalid container structure (not dict, missing Container key)"
+        validation_order: 5
+      
+      - errorcode: "YDM00066"
+        errorstring: "Either ContainerNo or ShipmentContainerKey is mandatory"
+        root_cause: "WMS not sending container identifiers"
+        validation_order: 6
+      
+      - errorcode: "YFS10282"
+        errorstring_pattern: "Shipped Quantity Zero"
+        root_cause: "WMS sent zero quantity OR quantity field missing"
+        validation_order: 7
+      
+      - errorcode: "YCD00067"
+        errorstring_pattern: "exceeds Ordered Quantity"
+        root_cause: "WMS picked more than ordered OR order modified after release"
+        validation_order: 9
+      
+      - errorcode: "YFSI10000"
+        errorstring_pattern: "Invalid Item For Ship Node"
+        root_cause: "WMS picked wrong item OR item master out of sync"
+        validation_order: 10
+      
+      - errorcode: "YDM00017"
+        errorstring_pattern: "Order not found|invalid shipment"
+        root_cause: "WMS using wrong OrderNo/ShipmentKey OR order/shipment deleted"
+        validation_order: 3
+    
+    remediation:
+      integration_issues:
+        - "Check WMS message format in YFS_REPROCESS_ERROR.MESSAGE (XML/JSON structure)"
+        - "Verify WMS is sending complete container details with ContainerNo"
+        - "Check if WMS and OMS shipment numbers match"
+        - "Verify network/transformation layer not corrupting message"
+      
+      data_sync_issues:
+        - "Query yfs_shipment_line to verify lines exist in OMS"
+        - "Check if shipment was modified/cancelled in OMS after release sent to WMS"
+        - "Verify OMS and WMS inventory records are synchronized"
+      
+      immediate_action:
+        - "Product is already shipped - customer will receive it"
+        - "Manually update OMS shipment status to prevent customer service confusion"
+        - "Create tracking records manually if WMS has tracking numbers"
+        - "Fix root cause to prevent future sync issues"
+    
+    rca_template: |
+      ## confirmShipment Message Validation (BR003)
+      
+      ⚠️ **CRITICAL CONTEXT**: 
+      - WMS has ALREADY physically shipped this order
+      - Product is in transit to customer
+      - This exception is a DATA SYNC issue, not a shipment blockage
+      
+      ### Validation Order
+      - Checked in order: {validation_order}
+      - Failed at: {failed_check}
+      - Error Code: {error_code}
+      
+      ### OMS State Check
+      - Shipment Number: {shipment_no}
+      - OMS Shipment Status: {status}
+      - Shipment Lines in OMS: {line_count_in_oms}
+      - Containers in OMS: {container_count_in_oms}
+      
+      ### WMS Message Analysis
+      - Message Format: {message_format} (JSON/XML)
+      - Containers in WMS Message: {wms_container_count}
+      - Items in WMS Message: {wms_item_count}
+      
+      ### Root Cause
+      - **Issue Type**: OMS-WMS Integration Data Mismatch
+      - **Business Rule Violated**: BR003 - confirmShipment Message Validation
+      - **Specific Validation Failed**: {validation_check_failed}
+      - **Error Code**: {error_code}
+      
+      ### Business Impact
+      - ✅ Customer WILL receive product (already shipped by WMS)
+      - ❌ OMS has no visibility into shipment status
+      - ❌ Customer cannot track shipment in OMS portal
+      - ❌ Customer service sees order as "not shipped"
+      - ⚠️ Revenue recognition may be delayed (shipment not confirmed in OMS)
+  
+  BR004_multi_tenancy:
+    id: "BR004"
+    name: "Multi-Tenancy Security Filter"
+    category: "Security"
+    statement: "All queries joining to yfs_order_header MUST filter by enterprise_key"
+    severity: critical
+    blocking: true
+    
+    validation_logic: |
+      if 'yfs_order_header' in sql_tables:
+          if 'enterprise_key' not in where_clause:
+              raise SecurityError("BR004: Missing enterprise_key filter")
+    
+    rca_template: |
+      ## Security Violation (BR004)
+      - **Critical**: Query attempted without enterprise_key filter
+      - **Business Rule Violated**: BR004 - Multi-Tenancy Security
+      - **Action**: Query rejected for security reasons
+  
+  BR005_quantity_reconciliation:
+    id: "BR005"
+    name: "Quantity Integrity Constraints"
+    category: "Data Integrity"
+    statement: "released_qty <= ordered_qty AND shipped_qty <= released_qty"
+    severity: high
+    blocking: false
+    
+    validation_query: |
+      SELECT 
+        ol.order_line_key,
+        ol.prime_line_no,
+        ol.item_id,
+        ol.ordered_qty,
+        COALESCE(SUM(orel.quantity), 0) as released_qty,
+        COALESCE(SUM(CASE WHEN s.status IN ('1400', '9000') THEN sl.quantity ELSE 0 END), 0) as shipped_qty,
+        CASE 
+          WHEN COALESCE(SUM(orel.quantity), 0) > ol.ordered_qty THEN 'VIOLATION - Over-released'
+          WHEN COALESCE(SUM(CASE WHEN s.status IN ('1400', '9000') THEN sl.quantity ELSE 0 END), 0) > COALESCE(SUM(orel.quantity), 0) THEN 'VIOLATION - Over-shipped'
+          ELSE 'OK'
+        END as integrity_check
+      FROM yfs_order_line ol
+      LEFT JOIN yfs_order_release orel ON ol.order_line_key = orel.order_line_key
+        AND orel.status NOT IN ('CANCELLED')
+      LEFT JOIN yfs_shipment_line sl ON ol.order_line_key = sl.order_line_key
+      LEFT JOIN yfs_shipment s ON sl.shipment_key = s.shipment_key
+      WHERE ol.order_line_key = :order_line_key
+      GROUP BY ol.order_line_key, ol.prime_line_no, ol.item_id, ol.ordered_qty
+    
+    rca_template: |
+      ## Quantity Integrity Check (BR005)
+      - Ordered: {ordered_qty}
+      - Released: {released_qty}
+      - Shipped: {shipped_qty}
+      {if over_released}
+      - ⚠️ **Data Integrity Violation**: Released quantity exceeds ordered quantity
+      - **Investigation Required**: Check for duplicate releases or order modifications
+      {endif}
+
+# ============================================
+# STATE MACHINES
+# ============================================
+
+state_machines:
+  
+  Order_PaymentStatus:
+    entity: Order
+    state_field: payment_status
+    description: "Order payment lifecycle"
+    
+    states:
+      PENDING:
+        description: "Payment authorization not yet attempted"
+        allowed_transitions: [AUTHORIZED, FAILED]
+        actions_allowed: []
+        actions_blocked: [RELEASE, SHIP]
+      
+      AUTHORIZED:
+        description: "Payment authorized successfully"
+        allowed_transitions: [SETTLED, FAILED]
+        actions_allowed: [RELEASE, SHIP, CANCEL]
+        business_rules_enabled: ["BR001"]
+      
+      SETTLED:
+        description: "Payment captured/settled"
+        allowed_transitions: [REFUNDED]
+        actions_allowed: [RELEASE, SHIP, RETURN]
+        business_rules_enabled: ["BR001"]
+      
+      FAILED:
+        description: "Payment authorization/settlement failed"
+        allowed_transitions: [PENDING, AUTHORIZED]
+        actions_allowed: [RETRY_PAYMENT, CANCEL]
+        actions_blocked: [RELEASE, SHIP]
+        recommended_actions:
+          - "Contact customer for alternate payment method"
+          - "Verify payment gateway connectivity"
+  
+  OrderRelease_Status:
+    entity: OrderRelease
+    state_field: status
+    description: "Release lifecycle"
+    
+    states:
+      CREATED:
+        description: "Release record created but not yet released"
+        allowed_transitions: [RELEASED, CANCELLED]
+        prerequisites: ["Order.payment_status IN ('AUTHORIZED', 'SETTLED')"]
+        actions_blocked: [SHIP]
+      
+      RELEASED:
+        description: "Quantity released for fulfillment"
+        allowed_transitions: [SCHEDULED, SHIPPED, BACKORDERED]
+        actions_allowed: [CREATE_SHIPMENT, SHIP]
+        business_rules_enabled: ["BR002"]
+      
+      SCHEDULED:
+        description: "Shipment scheduled"
+        allowed_transitions: [SHIPPED, CANCELLED]
+        actions_allowed: [CONFIRM_SHIPMENT]
+      
+      SHIPPED:
+        description: "Release has been shipped"
+        allowed_transitions: [DELIVERED]
+        actions_blocked: [MODIFY_QUANTITY, CANCEL]
+      
+      DELIVERED:
+        description: "Release delivered to customer"
+        terminal: true
+  
+  Shipment_Status:
+    entity: Shipment
+    state_field: status
+    description: "Shipment lifecycle"
+    
+    states:
+      "1100":
+        code: "1100"
+        name: "CREATED"
+        description: "Shipment created, not yet confirmed"
+        allowed_transitions: ["1400", "9000"]
+        prerequisites:
+          - "At least one shipment line exists"
+          - "All order lines have order_release_key (released per BR002)"
+        actions_allowed: [CONFIRM_SHIPMENT, ADD_CONTAINERS]
+      
+      "1400":
+        code: "1400"
+        name: "SHIPPED"
+        description: "Shipment confirmed and shipped"
+        allowed_transitions: ["9000"]
+        prerequisites:
+          - "At least one container with tracking number (BR003)"
+        actions_allowed: [TRACK_SHIPMENT]
+        actions_blocked: [MODIFY_LINES, CANCEL]
+      
+      "9000":
+        code: "9000"
+        name: "DELIVERED"
+        description: "Shipment delivered to customer"
+        terminal: true
+
+# ============================================
+# EXCEPTION TAXONOMY
+# ============================================
+
+exception_types:
+  description: "All 8 implemented exception types for confirmShipment validation"
+  
+  validation_precedence:
+    description: "Order of validation checks in confirm_shipment_service.py"
+    order:
+      1: "YDM00129 - Shipment Already Confirmed (checked first, before order lookup)"
+      2: "YDM00065 - OrderNo Required (if missing from payload)"
+      3: "YDM00017 - Order Not Found (after order lookup fails)"
+      4: "YFS10287 - No Containers Element (before accessing containers)"
+      5: "YDM00072 - Invalid Container Structure (after containers check)"
+      6: "YDM00066 - Missing ContainerNo (when processing each container)"
+      7: "YFS10282 - Shipped Quantity Zero (checked before negative quantity)"
+      8: "YDM00120 - Negative Quantity (checked after zero quantity)"
+      9: "YCD00067 - Quantity Exceeds Ordered (after order_line retrieved)"
+      10: "YFSI10000 - Invalid Item For Ship Node (when payload ItemID differs)"
+      11: "YDM00017 - Invalid ShipmentKey (when confirming existing shipment)"
+    
+    note: "Validation stops at first error encountered. Order matters for accurate error classification."
+  
+  known_types:
+    
+    SHIPMENT_ALREADY_CONFIRMED:
+      errorcode: "YDM00129"
+      flow_name: "confirmShipment"
+      typical_errorstring: "Shipment already confirmed: {shipment_no}"
+      severity: high
+      frequency: medium
+      business_rule_violated: "BR003"
+      validation_order: 1
+      
+      system_context: "WMS → OMS integration message validation failure"
+      physical_reality: "Product ALREADY shipped by WMS - duplicate confirmation message"
+      impact_type: "Duplicate message - shipment already processed, no action needed"
+      
+      validation_logic: |
+        Checked FIRST before any order lookup:
+        1. If shipment_no provided in payload
+        2. Query: SELECT * FROM yfs_shipment WHERE TRIM(shipment_no) = :shipment_no
+        3. If shipment exists AND status = '1400' (SHIPPED)
+        4. Raise YDM00129
+      
+      required_context:
+        - entity: Exception
+          fields: [message, error_reference]
+          purpose: "Extract ShipmentNo from WMS message"
+        
+        - entity: Shipment
+          fields: [shipment_no, status, ship_date, actual_shipment_date]
+          purpose: "Verify shipment status is 1400 (already confirmed)"
+          query_note: "MUST use TRIM() on shipment_no for comparison"
+      
+      causal_investigation:
+        duplicate_message:
+          - "Check if WMS sent same confirmShipment message twice"
+          - "Verify message timestamps - are they identical?"
+          - "Check integration layer for duplicate message detection"
+        
+        idempotency_issue:
+          - "WMS may not track which shipments it already confirmed"
+          - "OMS should handle duplicate gracefully (idempotent operation)"
+        
+        timing_issue:
+          - "Did WMS confirm, then OMS updated status, then WMS sent again?"
+          - "Check time between first confirmation and duplicate message"
+      
+      root_cause_patterns:
+        - pattern: "Same message sent twice within seconds"
+          diagnosis: "WMS retry logic or network duplicate"
+          resolution: "Implement idempotency check - ignore if status already 1400"
+        
+        - pattern: "Message sent hours/days after first confirmation"
+          diagnosis: "WMS not tracking confirmation status"
+          resolution: "Fix WMS to track confirmed shipments, or implement OMS idempotency"
+      
+      resolution_steps:
+        - "Verify shipment status is 1400 (SHIPPED) in OMS"
+        - "Confirm tracking number is valid"
+        - "Mark exception as 'Resolved - Duplicate Message'"
+        - "No manual intervention needed - shipment already successful"
+      
+      prevention: "Implement message deduplication in WMS integration layer. Track message IDs to prevent duplicate sends."
+      
+      similarity_factors: [flow_name, errorcode, shipment_no, status]
+    
+    NO_CARTON_HEADER_RECORD:
+      errorcode: "YFS10287"
+      flow_name: "confirmShipment"
+      typical_errorstring: "No Carton Header Record(ShipmentContainer) for the shipment"
+      severity: high
+      frequency: high
+      business_rule_violated: "BR003"
+      validation_order: 4
+      
+      system_context: "WMS → OMS integration message validation failure"
+      physical_reality: "Product ALREADY shipped by WMS - but message missing container structure"
+      impact_type: "Data synchronization issue - OMS cannot record container/tracking info"
+      
+      validation_logic: |
+        Checked BEFORE accessing shipment_data['Containers']:
+        1. Check if 'Containers' key exists in shipment_data
+        2. Check if shipment_data['Containers'] is not None
+        3. If either fails, raise YFS10287
+        Note: Must check BEFORE accessing to avoid KeyError
+      
+      required_context:
+        - entity: Exception
+          fields: [message, error_reference]
+          purpose: "Parse WMS message - verify Containers element is missing"
+        
+        - entity: Order
+          fields: [order_no, order_date, customer_emailid]
+          purpose: "Historical context - order was already released"
+        
+        - entity: Shipment
+          fields: [shipment_no, status, ship_date]
+          purpose: "Check OMS shipment state"
+      
+      causal_investigation:
+        wms_message_issue:
+          - "Parse MESSAGE CLOB - does it contain 'Containers' key?"
+          - "Is Containers element null/empty: {} or []?"
+          - "Did WMS packing process fail to generate container data?"
+          - "Did integration layer strip out Containers element?"
+        
+        oms_expectation_mismatch:
+          - "Does OMS require Containers but WMS sends shipment without containers?"
+          - "Check if WMS supports container-less shipments"
+        
+        integration_issue:
+          - "Check integration logs for message transformation errors"
+          - "Verify WMS message format version matches OMS expectations"
+          - "Check if message size limit caused truncation"
+      
+      root_cause_patterns:
+        - pattern: "Containers key missing from message"
+          diagnosis: "WMS not sending container structure"
+          resolution: "Fix WMS to include Containers element in confirmShipment message"
+        
+        - pattern: "Containers: null or empty object"
+          diagnosis: "WMS sent empty containers structure"
+          resolution: "Fix WMS packing process to generate container data"
+        
+        - pattern: "Message truncated or malformed"
+          diagnosis: "Integration layer or network issue"
+          resolution: "Check message size limits, fix integration transformation"
+      
+      resolution_steps:
+        - "Parse MESSAGE to extract any container/tracking info manually"
+        - "If WMS has tracking numbers, manually create yfs_shipment_container records"
+        - "Update shipment status to 1400 if product was shipped"
+        - "Fix root cause to prevent future occurrences"
+      
+      prevention: "Ensure WMS always includes Containers element with at least one Container. Validate message structure in integration layer."
+      
+      similarity_factors: [flow_name, errorcode, has_containers_key, containers_value_type]
+    
+    INVALID_CONTAINER_STRUCTURE:
+      errorcode: "YDM00072"
+      flow_name: "confirmShipment"
+      typical_errorstring: "Shipment Container element is invalid"
+      severity: high
+      frequency: medium
+      business_rule_violated: "BR003"
+      validation_order: 5
+      
+      system_context: "WMS → OMS integration message validation failure"
+      physical_reality: "Product ALREADY shipped by WMS - but container structure malformed"
+      impact_type: "Data synchronization issue - OMS cannot parse container data"
+      
+      validation_logic: |
+        Checked AFTER confirming Containers element exists:
+        1. Check if shipment_data['Containers'] is a dict
+        2. Check if 'Container' key exists in Containers dict
+        3. If either fails, raise YDM00072
+        Note: Different from YFS10287 (missing) - this is invalid structure
+      
+      required_context:
+        - entity: Exception
+          fields: [message, error_reference]
+          purpose: "Parse WMS message - verify container structure format"
+        
+        - entity: Shipment
+          fields: [shipment_no, status]
+          purpose: "Check OMS shipment state"
+      
+      causal_investigation:
+        wms_message_issue:
+          - "Parse MESSAGE CLOB - what is the type of Containers element?"
+          - "Is Containers a list instead of dict with Container key?"
+          - "Is Container an array when OMS expects single object?"
+          - "Did WMS send XML when OMS expects JSON (or vice versa)?"
+        
+        integration_transformation:
+          - "Check if integration layer transformed Containers incorrectly"
+          - "Verify JSON/XML parsing didn't corrupt structure"
+          - "Check if message schema version mismatch"
+      
+      root_cause_patterns:
+        - pattern: "Containers is array instead of dict"
+          diagnosis: "WMS/OMS structure mismatch"
+          resolution: "Align message format - OMS expects {'Containers': {'Container': [...]}}"
+        
+        - pattern: "Container key missing but Containers exists"
+          diagnosis: "WMS sent wrong structure"
+          resolution: "Fix WMS to use correct structure: Containers.Container"
+        
+        - pattern: "XML vs JSON format mismatch"
+          diagnosis: "Integration layer format conversion issue"
+          resolution: "Fix integration transformation to preserve structure"
+      
+      resolution_steps:
+        - "Manually parse MESSAGE to extract container data"
+        - "Reconstruct correct structure if possible"
+        - "Create yfs_shipment_container records manually"
+        - "Fix integration layer or WMS message format"
+      
+      prevention: "Validate message structure in integration layer before passing to OMS. Use schema validation."
+      
+      similarity_factors: [flow_name, errorcode, containers_type, has_container_key]
+    
+    MISSING_CONTAINER_NO:
+      errorcode: "YDM00066"
+      flow_name: "confirmShipment"
+      typical_errorstring: "Either ContainerNo or ShipmentContainerKey is mandatory"
+      severity: high
+      frequency: medium
+      business_rule_violated: "BR003"
+      validation_order: 6
+      
+      system_context: "WMS → OMS integration message validation failure"
+      physical_reality: "Product ALREADY packed in containers by WMS - but container identifier missing"
+      impact_type: "Data synchronization issue - OMS cannot identify which container"
+      
+      validation_logic: |
+        Checked for EACH container in Containers.Container array:
+        1. Extract container_no = container.get('ContainerNo')
+        2. Extract container_key = container.get('ShipmentContainerKey')
+        3. If both are None/empty, raise YDM00066
+        Note: At least one must be present
+      
+      required_context:
+        - entity: Exception
+          fields: [message, error_reference]
+          purpose: "Parse WMS message - verify which containers missing identifiers"
+        
+        - entity: Shipment
+          fields: [shipment_no, status]
+          purpose: "Check OMS shipment state"
+        
+        - entity: ShipmentContainer
+          fields: [container_no, shipment_container_key]
+          purpose: "Check if containers already exist (might use key instead of no)"
+      
+      causal_investigation:
+        wms_message_issue:
+          - "Parse MESSAGE CLOB - which containers are missing ContainerNo?"
+          - "Does WMS generate ContainerNo during packing?"
+          - "Did WMS send ShipmentContainerKey but OMS expects ContainerNo?"
+        
+        oms_expectation_mismatch:
+          - "Does OMS require ContainerNo but WMS only sends ShipmentContainerKey?"
+          - "Check if OMS can accept ShipmentContainerKey instead"
+        
+        integration_issue:
+          - "Did integration layer strip out ContainerNo field?"
+          - "Check field mapping in transformation"
+      
+      root_cause_patterns:
+        - pattern: "All containers missing ContainerNo"
+          diagnosis: "WMS not generating container numbers"
+          resolution: "Fix WMS to generate ContainerNo during packing"
+        
+        - pattern: "Some containers have ContainerNo, others don't"
+          diagnosis: "Inconsistent WMS packing process"
+          resolution: "Fix WMS packing to always generate ContainerNo"
+        
+        - pattern: "ShipmentContainerKey present but ContainerNo missing"
+          diagnosis: "WMS/OMS identifier mismatch"
+          resolution: "Map ShipmentContainerKey to ContainerNo, or accept both"
+      
+      resolution_steps:
+        - "If ShipmentContainerKey present, use it to identify container"
+        - "Generate ContainerNo from ShipmentContainerKey if mapping exists"
+        - "Manually create container records with generated identifiers"
+        - "Fix WMS to always send ContainerNo"
+      
+      prevention: "Ensure WMS always generates and sends ContainerNo for each container. Validate in integration layer."
+      
+      similarity_factors: [flow_name, errorcode, container_count, has_container_key]
+    
+    SHIPPED_QUANTITY_ZERO:
+      errorcode: "YFS10282"
+      flow_name: "confirmShipment"
+      typical_errorstring: "Shipped Quantity Zero for OrderLineKey: {order_line_key}"
+      severity: high
+      frequency: medium
+      business_rule_violated: "BR003"
+      validation_order: 7
+      
+      system_context: "WMS → OMS integration message validation failure"
+      physical_reality: "WMS attempted to confirm shipment with zero quantity"
+      impact_type: "Business rule violation - cannot ship zero quantity"
+      
+      validation_logic: |
+        Checked FIRST before negative quantity check:
+        1. Parse quantity from ShipmentLine.Quantity
+        2. Convert to Decimal
+        3. If quantity == 0, raise YFS10282
+        Note: Must check == 0 BEFORE checking < 0 (YDM00120)
+      
+      required_context:
+        - entity: Exception
+          fields: [message, error_reference]
+          purpose: "Extract quantity from ShipmentLine in WMS message"
+        
+        - entity: OrderLine
+          fields: [order_line_key, item_id, ordered_qty]
+          purpose: "Compare with ordered quantity"
+        
+        - entity: ShipmentLine
+          fields: [quantity]
+          purpose: "Verify quantity in OMS matches WMS message"
+      
+      causal_investigation:
+        wms_message_issue:
+          - "Parse MESSAGE CLOB - what quantity did WMS send?"
+          - "Is Quantity field missing or explicitly set to 0?"
+          - "Did WMS pack item but quantity got corrupted in message?"
+        
+        wms_packing_issue:
+          - "Did WMS actually pack zero items?"
+          - "Check WMS picking/packing logs"
+          - "Was item out of stock but WMS still created container?"
+        
+        integration_issue:
+          - "Did integration layer set quantity to 0?"
+          - "Check quantity transformation logic"
+      
+      root_cause_patterns:
+        - pattern: "Quantity explicitly 0 in WMS message"
+          diagnosis: "WMS packed zero items (data quality issue)"
+          resolution: "Fix WMS packing process - don't create shipment lines with zero quantity"
+        
+        - pattern: "Quantity missing, defaulted to 0"
+          diagnosis: "WMS message missing quantity field"
+          resolution: "Fix WMS to always include Quantity field"
+        
+        - pattern: "Quantity corrupted in transmission"
+          diagnosis: "Integration layer or network issue"
+          resolution: "Fix message transformation, add validation"
+      
+      resolution_steps:
+        - "Check WMS logs to verify actual quantity packed"
+        - "If quantity > 0 in WMS, fix message and retry"
+        - "If quantity actually 0, investigate why WMS packed zero items"
+        - "Remove shipment line if quantity should be zero"
+      
+      prevention: "WMS should validate quantity > 0 before sending confirmShipment. OMS validation is backup check."
+      
+      similarity_factors: [flow_name, errorcode, order_line_key, item_id]
+    
+    PICKED_QTY_EXCEEDS_ORDERED:
+      errorcode: "YCD00067"
+      flow_name: "confirmShipment"
+      typical_errorstring: "Picked Quantity ({quantity}) exceeds Ordered Quantity ({ordered_qty}) for OrderLineKey: {order_line_key}"
+      severity: high
+      frequency: medium
+      business_rule_violated: "BR005"
+      validation_order: 9
+      
+      system_context: "WMS → OMS integration message validation failure"
+      physical_reality: "WMS picked/shipped more quantity than customer ordered"
+      impact_type: "Business rule violation - cannot ship more than ordered"
+      
+      validation_logic: |
+        Checked AFTER order_line is retrieved:
+        1. Retrieve OrderLine by order_line_key
+        2. Compare quantity (from WMS) with order_line.ordered_qty
+        3. If quantity > order_line.ordered_qty, raise YCD00067
+        Note: Must retrieve order_line first (variable scoping)
+      
+      required_context:
+        - entity: Exception
+          fields: [message, error_reference]
+          purpose: "Extract quantity from WMS message"
+        
+        - entity: OrderLine
+          fields: [order_line_key, item_id, ordered_qty, prime_line_no]
+          purpose: "CRITICAL: Compare shipped quantity with ordered quantity"
+        
+        - entity: Order
+          fields: [order_no, order_date]
+          purpose: "Context for order"
+      
+      causal_investigation:
+        wms_picking_issue:
+          - "Did WMS pick wrong quantity from warehouse?"
+          - "Check WMS picking logs - what quantity was picked?"
+          - "Was there a picking error (e.g., picked 10 instead of 5)?"
+        
+        order_modification:
+          - "Was order quantity reduced after release sent to WMS?"
+          - "Check order modification history"
+          - "Did customer cancel part of order after WMS picked?"
+        
+        wms_message_issue:
+          - "Did WMS send wrong quantity in message?"
+          - "Parse MESSAGE - verify quantity matches what WMS actually shipped"
+      
+      root_cause_patterns:
+        - pattern: "WMS picked more than ordered"
+          diagnosis: "WMS picking error or inventory issue"
+          resolution: "Fix WMS picking process, verify inventory accuracy"
+        
+        - pattern: "Order quantity reduced after release"
+          diagnosis: "Order modification after WMS received release"
+          resolution: "Implement order modification notification to WMS, or accept over-shipment"
+        
+        - pattern: "WMS message has wrong quantity"
+          diagnosis: "WMS message generation error"
+          resolution: "Fix WMS to send correct quantity from actual picked amount"
+      
+      resolution_steps:
+        - "Verify actual quantity WMS shipped (check physical shipment)"
+        - "If over-shipped: Accept as customer benefit OR return excess"
+        - "If message error: Fix and retry confirmation"
+        - "Update order if quantity was modified after release"
+      
+      prevention: "WMS should validate picked quantity <= ordered quantity before sending confirmShipment. Notify WMS of order modifications."
+      
+      similarity_factors: [flow_name, errorcode, order_line_key, quantity_ratio]
+    
+    INVALID_SHIPMENT_KEY:
+      errorcode: "YDM00017"
+      flow_name: "confirmShipment"
+      typical_errorstring: |
+        "ShipmentKey or ShipmentNo points to an invalid shipment: {shipment_key}" 
+        OR "Order not found: {order_no}"
+      severity: high
+      frequency: medium
+      business_rule_violated: "BR003"
+      validation_order: 3
+      
+      system_context: "WMS → OMS integration message validation failure"
+      physical_reality: "WMS referencing shipment/order that doesn't exist in OMS"
+      impact_type: "Data synchronization issue - WMS and OMS out of sync"
+      
+      validation_logic: |
+        Two scenarios:
+        1. Order lookup: If OrderNo provided, query Order by order_no. If not found, raise YDM00017
+        2. Shipment lookup: If confirming existing shipment, query Shipment by shipment_key. If not found, raise YDM00017
+      
+      required_context:
+        - entity: Exception
+          fields: [message, error_reference]
+          purpose: "Extract OrderNo or ShipmentKey from WMS message"
+        
+        - entity: Order
+          fields: [order_no, order_header_key, order_date]
+          purpose: "Verify order exists in OMS"
+          conditional: "If OrderNo in message"
+        
+        - entity: Shipment
+          fields: [shipment_key, shipment_no, status]
+          purpose: "Verify shipment exists in OMS"
+          conditional: "If ShipmentKey in message"
+      
+      causal_investigation:
+        wms_reference_issue:
+          - "Parse MESSAGE - what OrderNo/ShipmentKey did WMS send?"
+          - "Is WMS using wrong order/shipment reference?"
+          - "Did WMS receive wrong release message?"
+        
+        oms_data_issue:
+          - "Was order/shipment deleted in OMS after release sent to WMS?"
+          - "Check order/shipment deletion logs"
+          - "Was there a data migration that changed keys?"
+        
+        integration_issue:
+          - "Did integration layer corrupt OrderNo/ShipmentKey?"
+          - "Check message transformation for key mapping errors"
+      
+      root_cause_patterns:
+        - pattern: "OrderNo doesn't exist in OMS"
+          diagnosis: "WMS using wrong order reference OR order deleted"
+          resolution: "Verify WMS received correct release message. Check if order was cancelled/deleted."
+        
+        - pattern: "ShipmentKey doesn't exist in OMS"
+          diagnosis: "WMS referencing shipment that was never created or was deleted"
+          resolution: "Verify shipment creation process. Check if shipment was cancelled."
+        
+        - pattern: "Key format mismatch"
+          diagnosis: "WMS and OMS using different key formats"
+          resolution: "Align key formats or implement mapping"
+      
+      resolution_steps:
+        - "Verify WMS message has correct OrderNo/ShipmentKey"
+        - "Check if order/shipment was deleted in OMS"
+        - "If order exists but shipment doesn't, create shipment in OMS"
+        - "If order doesn't exist, investigate why WMS has reference to non-existent order"
+      
+      prevention: "Ensure WMS always uses correct OrderNo/ShipmentKey from release message. Implement validation in integration layer."
+      
+      similarity_factors: [flow_name, errorcode, order_no, shipment_key]
+    
+    INVALID_ITEM_FOR_SHIP_NODE:
+      errorcode: "YFSI10000"
+      flow_name: "confirmShipment"
+      typical_errorstring: "Invalid Item For Ship Node: ItemID {item_id} not found in system"
+      severity: high
+      frequency: low
+      business_rule_violated: "BR003"
+      validation_order: 10
+      
+      system_context: "WMS → OMS integration message validation failure"
+      physical_reality: "WMS shipped item that doesn't exist in OMS item master"
+      impact_type: "Data quality issue - item master out of sync"
+      
+      validation_logic: |
+        Checked when payload ItemID differs from OrderLine ItemID:
+        1. Extract ItemID from ShipmentLine payload
+        2. Compare with OrderLine.item_id
+        3. If different, query yfs_item table for payload ItemID
+        4. If not found in yfs_item, raise YFSI10000
+        Note: Only validates if payload ItemID differs from order
+      
+      required_context:
+        - entity: Exception
+          fields: [message, error_reference]
+          purpose: "Extract ItemID from WMS ShipmentLine"
+        
+        - entity: OrderLine
+          fields: [order_line_key, item_id]
+          purpose: "Compare with payload ItemID"
+        
+        - entity: Item
+          fields: [item_id]
+          table: "yfs_item"
+          purpose: "Verify item exists in item master"
+      
+      causal_investigation:
+        wms_picking_issue:
+          - "Did WMS pick wrong item (substituted item)?"
+          - "Check WMS picking logs - what item was actually picked?"
+          - "Was there a picking error?"
+        
+        item_master_sync:
+          - "Is item in WMS but not in OMS item master?"
+          - "Check if item was added to WMS but not synchronized to OMS"
+          - "Was item deleted from OMS item master?"
+        
+        wms_message_issue:
+          - "Did WMS send wrong ItemID in message?"
+          - "Parse MESSAGE - verify ItemID matches what was actually picked"
+      
+      root_cause_patterns:
+        - pattern: "Item exists in WMS but not OMS"
+          diagnosis: "Item master synchronization issue"
+          resolution: "Sync item master - add item to OMS or remove from WMS"
+        
+        - pattern: "WMS picked wrong item"
+          diagnosis: "WMS picking error"
+          resolution: "Fix WMS picking process, verify item location accuracy"
+        
+        - pattern: "WMS message has wrong ItemID"
+          diagnosis: "WMS message generation error"
+          resolution: "Fix WMS to send correct ItemID from actual picked item"
+      
+      resolution_steps:
+        - "Verify actual item WMS shipped (check physical shipment)"
+        - "If item substitution: Accept if valid OR return and reship correct item"
+        - "If item master sync issue: Add item to OMS item master"
+        - "If message error: Fix and retry confirmation"
+      
+      prevention: "Keep WMS and OMS item masters synchronized. WMS should validate ItemID exists in OMS before sending confirmShipment."
+      
+      similarity_factors: [flow_name, errorcode, item_id, shipnode_key]
+    
+    # UNCLASSIFIED catch-all (exceptions not in above 8 types)
+    UNCLASSIFIED:
+      description: "Exceptions not matching the 8 implemented error types"
+      severity: unknown
+      handling_strategy: |
+        1. Parse MESSAGE to extract basic context (order_no, shipment_no)
+        2. Query ChromaDB for similar exceptions (similarity > 0.8)
+        3. If similar case found: Use as template
+        4. If no similar case: Generate preliminary RCA with human review flag
+        5. Track pattern: If same pattern appears >50 times, promote to known type
+      
+      required_context:
+        - entity: Order
+          fields: [order_no, customer_emailid]
+        - entity: Shipment
+          fields: [shipment_no, status]
+          conditional: "If shipment reference exists"
+      
+      promotion_threshold: 50
+
+# ============================================
+# RCA ENRICHMENT WORKFLOWS
+# ============================================
+
+rca_workflows:
+  
+  critical_context_by_flow:
+    description: "Different flows require different RCA approaches"
+    
+    createOrder_exceptions:
+      context: "OMS processing user/API input"
+      causal_model: "Forward causation - payment → release → shipment"
+      business_rules_block: true
+      physical_impact: "Order not created - nothing has shipped"
+      rca_focus: "Why did order creation fail? Fix and retry."
+    
+    releaseOrder_exceptions:
+      context: "OMS attempting to send release to WMS"
+      causal_model: "Prerequisites check - payment must be authorized"
+      business_rules_block: true
+      physical_impact: "Release not sent to WMS - WMS doesn't know to ship"
+      rca_focus: "Why was release blocked? Check BR001 (payment), inventory, etc."
+    
+    confirmShipment_exceptions:
+      context: "WMS → OMS inbound message validation"
+      causal_model: "Backward reconciliation - WMS says shipped, does OMS data match?"
+      business_rules_block: false
+      physical_impact: "Product ALREADY SHIPPED by WMS - in transit to customer"
+      data_impact: "OMS has no visibility - tracking blind spot"
+      rca_focus: |
+        This is NOT about blocking shipment (shipment already happened).
+        This is about data synchronization between WMS and OMS.
+        
+        Key questions:
+        1. What did WMS send in the message? (Parse MESSAGE CLOB)
+        2. What does OMS expect? (Query shipment/lines in OMS)
+        3. Why don't they match? (Integration issue, timing, data corruption)
+        4. How do we manually sync? (Fix OMS data to reflect reality)
+      
+      critical_reminder: |
+        ⚠️ DO NOT say "order cannot be released" or "order cannot ship"
+        ✅ DO say "data sync issue - product already shipped, OMS needs manual update"
+  
+  standard_exception:
+    description: "Standard RCA generation for known exception types"
+    steps:
+      1_classify:
+        purpose: "Determine exception type from ontology taxonomy"
+        input: [errorcode, errorstring, flow_name, exception_group_name]
+        output: exception_type
+      
+      2_extract_references:
+        purpose: "Extract order_no, shipment_no from MESSAGE and ERROR_REFERENCE"
+        input: [message, error_reference]
+        output: [order_no, shipment_no, enterprise_key]
+      
+      3_validate_business_rules:
+        purpose: "Check which business rules were violated"
+        input: [exception_type, order_no]
+        queries: "Execute validation_query for each relevant business_rule"
+        output: [violated_rules, causal_chain]
+      
+      4_gather_order_lifecycle:
+        purpose: "Get complete order → line → release → shipment context"
+        queries:
+          - order_details
+          - order_lines
+          - order_releases
+          - shipments
+          - quantity_reconciliation
+        output: enriched_context
+      
+      5_search_similar:
+        purpose: "Find similar historical RCAs"
+        input: [errorstring, exception_type, similarity_factors]
+        chromadb_query: true
+        output: similar_rcas
+      
+      6_generate_rca:
+        purpose: "Synthesize comprehensive RCA document"
+        input: [exception, enriched_context, violated_rules, similar_rcas]
+        template: exception_type.rca_template
+        output: rca_document
+  
+  unclassified_exception:
+    description: "Handling for UNCLASSIFIED exceptions"
+    steps:
+      1_extract_basic_context:
+        purpose: "Extract order/shipment references"
+      
+      2_search_similar_high_threshold:
+        purpose: "Find very similar cases"
+        chromadb_similarity_threshold: 0.8
+      
+      3_generate_preliminary_rca:
+        purpose: "Create basic RCA with human review flag"
+        flag_for_review: true
+      
+      4_track_pattern:
+        purpose: "Log pattern for potential promotion"
+        increment_pattern_counter: true
+
+# ============================================
+# WMS MESSAGE STRUCTURE (for confirmShipment)
+# ============================================
+
+wms_message_structure:
+  description: "Expected structure of confirmShipment message from WMS to OMS"
+  
+  data_model_context: |
+    IMPORTANT: ShipmentLine and ShipmentContainer do NOT have direct FK relationship in database.
+    Both are linked to Shipment via shipment_key and to OrderRelease via order_release_key.
+    
+    In WMS message, ShipmentLines can be specified in TWO ways:
+    1. Nested under Container (shows which items in which box)
+    2. Directly under Shipment (generic, not container-specific)
+    
+    Database stores them separately, both linked to Shipment.
+  
+  message_formats:
+    format1_lines_under_container:
+      description: "ShipmentLines nested under Container (preferred - shows packing)"
+      example: |
+        {
+          "Shipment": {
+            "ShipmentNo": "SHIP2025122304252",
+            "OrderNo": "EO0100000792",
+            "ReleaseNo": "1",
+            "EnterpriseCode": "PLANTRIX_EU",
+            "Containers": {
+              "Container": [
+                {
+                  "ContainerNo": "CONT123",
+                  "TrackingNo": "1Z999AA10123456784",
+                  "ContainerSCM": "SCM001",
+                  "ShipmentLines": {
+                    "ShipmentLine": [
+                      {
+                        "ItemID": "WIDGET-001",
+                        "Quantity": "10",
+                        "OrderLineKey": "..."
+                      },
+                      {
+                        "ItemID": "WIDGET-002",
+                        "Quantity": "5",
+                        "OrderLineKey": "..."
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      
+      required_fields:
+        - "Shipment.ShipmentNo"
+        - "Shipment.Containers.Container (at least one)"
+        - "Shipment.Containers.Container.ContainerNo"
+        - "Shipment.Containers.Container.ShipmentLines.ShipmentLine (at least one)"
+      
+      optional_fields:
+        - "TrackingNo (highly recommended for customer tracking)"
+        - "ContainerSCM"
+        - "OrderNo (helps with validation)"
+      
+      note: |
+        This format shows which items are packed in which container.
+        OMS will create:
+        - yfs_shipment_container records (with tracking_no)
+        - yfs_shipment_line records (linked to shipment, not directly to container)
+    
+    format2_lines_under_shipment:
+      description: "ShipmentLines directly under Shipment (alternative)"
+      example: |
+        {
+          "Shipment": {
+            "ShipmentNo": "SHIP2025122304252",
+            "OrderNo": "EO0100000792",
+            "ReleaseNo": "1",
+            "EnterpriseCode": "PLANTRIX_EU",
+            "ShipmentLines": {
+              "ShipmentLine": [
+                {
+                  "ItemID": "WIDGET-001",
+                  "Quantity": "10",
+                  "OrderLineKey": "..."
+                },
+                {
+                  "ItemID": "WIDGET-002",
+                  "Quantity": "5",
+                  "OrderLineKey": "..."
+                }
+              ]
+            },
+            "Containers": {
+              "Container": [
+                {
+                  "ContainerNo": "CONT123",
+                  "TrackingNo": "1Z999AA10123456784"
+                }
+              ]
+            }
+          }
+        }
+      
+      required_fields:
+        - "Shipment.ShipmentNo"
+        - "Shipment.ShipmentLines.ShipmentLine (at least one)"
+        - "Shipment.Containers.Container (at least one)"
+      
+      note: |
+        This format does NOT show which items are in which container.
+        Both containers and lines are specified, but separately.
+        OMS will create both records, linked to shipment but not to each other.
+    
+    xml_format:
+      example: |
+        <Shipment ShipmentNo="SHIP2025122304252" OrderNo="EO0100000792">
+          <Containers>
+            <Container ContainerNo="CONT123" TrackingNo="1Z999AA10123456784">
+              <ShipmentLines>
+                <ShipmentLine ItemID="WIDGET-001" Quantity="10"/>
+              </ShipmentLines>
+            </Container>
+          </Containers>
+        </Shipment>
+  
+  validation_rules:
+    rule1_shipment_reference:
+      statement: "ShipmentNo must exist in yfs_shipment table"
+      validation_query: "SELECT shipment_key FROM yfs_shipment WHERE TRIM(shipment_no) = :shipment_no"
+      error_if_fails: "Shipment not found"
+    
+    rule2_containers_present:
+      statement: "Message must contain Containers element (not null)"
+      error_if_fails: "No Carton Header Record(ShipmentContainer) for the shipment (YFS10287)"
+      validation_order: 4
+    
+    rule3_containers_structure_valid:
+      statement: "Containers must be dict with 'Container' key"
+      error_if_fails: "Shipment Container element is invalid (YDM00072)"
+      validation_order: 5
+    
+    rule4_container_identifier_present:
+      statement: "Each Container must have ContainerNo OR ShipmentContainerKey"
+      error_if_fails: "Either ContainerNo or ShipmentContainerKey is mandatory (YDM00066)"
+      validation_order: 6
+    
+    rule4_container_quantity_match:
+      statement: "Sum of ShipmentLine quantities in container must be valid"
+      error_if_fails: "Quantity mismatch"
+  
+  common_message_issues:
+    empty_containers_element:
+      symptom: "YDM00205 - No Shipment Line is specified"
+      message_pattern: '<Containers></Containers> or "Containers": {}'
+      root_cause: "WMS sent empty containers structure"
+      diagnosis: "Check WMS picking/packing process - did they pack anything?"
+    
+    missing_shipment_lines_nested:
+      symptom: "YDM00205 - No Shipment Line is specified"
+      message_pattern: '<Container ContainerNo="..."></Container> (no ShipmentLines nested)'
+      root_cause: "Container exists but ShipmentLines element missing or empty"
+      diagnosis: |
+        - Check if WMS is using Format 1 (lines under container) or Format 2 (lines under shipment)
+        - If Format 1: WMS not populating ShipmentLines under Container
+        - If Format 2: OMS expecting Format 1 but WMS sent Format 2
+        - Integration layer may be stripping ShipmentLines element
+    
+    missing_shipment_lines_top_level:
+      symptom: "YDM00205 - No Shipment Line is specified"
+      message_pattern: 'Shipment has Containers but no ShipmentLines element at any level'
+      root_cause: "Neither Format 1 nor Format 2 structure present"
+      diagnosis: |
+        - WMS message completely missing ShipmentLines element
+        - Check if WMS is sending item details at all
+        - Verify WMS picked items from warehouse
+    
+    lines_and_containers_mismatch:
+      symptom: "Quantity validation failure or container reference error"
+      message_pattern: "ShipmentLines exist but don't match Containers"
+      root_cause: "Lines specified in one format, containers in another"
+      diagnosis: |
+        - If using Format 1: Ensure ALL lines are under Container elements
+        - If using Format 2: Ensure lines and containers are separate but both present
+        - Database will store both separately (no direct FK), but quantities should align
+    
+    malformed_json_xml:
+      symptom: "Cannot parse message"
+      message_pattern: "Truncated JSON/XML, encoding issues"
+      root_cause: "Network transmission error or size limit exceeded"
+      diagnosis: "Check integration logs for transmission errors"
+    
+    wrong_shipment_number:
+      symptom: "Shipment not found"
+      message_pattern: 'ShipmentNo="SHIP..." but not in OMS'
+      root_cause: "WMS using wrong shipment reference OR shipment deleted in OMS"
+      diagnosis: "Cross-reference WMS logs with OMS shipment creation logs"
+  
+  relationship_clarification:
+    database_model: |
+      In OMS database:
+      - yfs_shipment_line has shipment_key (FK to yfs_shipment)
+      - yfs_shipment_container has shipment_key (FK to yfs_shipment)
+      - NO direct FK between yfs_shipment_line and yfs_shipment_container
+      
+      Both also have order_release_key linking them to yfs_order_release.
+    
+    message_model: |
+      In WMS confirmShipment message:
+      - Lines can be nested under Container (Format 1) - shows packing
+      - Lines can be separate from Containers (Format 2) - shows items + boxes
+      - Either format is valid, OMS stores them separately
+    
+    query_pattern: |
+      To find which lines are "logically" in a container:
+      SELECT sl.* 
+      FROM yfs_shipment_container sc
+      JOIN yfs_shipment_line sl 
+        ON sc.shipment_key = sl.shipment_key
+        AND sc.order_release_key = sl.order_release_key
+      WHERE sc.container_no = :container_no
+      
+      This joins through shipment and release, not directly.
+
+# ============================================
+# QUERY TEMPLATES
+# ============================================
+
+query_templates:
+  
+  order_complete_context:
+    description: "Get comprehensive order lifecycle information"
+    purpose: "Standard enrichment for order-related exceptions"
+    sql: |
+      SELECT 
+        o.order_no,
+        o.order_date,
+        o.customer_emailid,
+        o.payment_status,
+        o.total_amount,
+        COUNT(DISTINCT ol.order_line_key) as line_count,
+        COUNT(DISTINCT orel.order_release_key) as release_count,
+        COUNT(DISTINCT s.shipment_key) as shipment_count,
+        SUM(ol.ordered_qty) as total_ordered_qty,
+        SUM(CASE WHEN orel.status = 'RELEASED' THEN orel.quantity ELSE 0 END) as released_qty,
+        SUM(CASE WHEN s.status IN ('1400', '9000') THEN sl.quantity ELSE 0 END) as shipped_qty
+      FROM yfs_order_header o
+      LEFT JOIN yfs_order_line ol ON o.order_header_key = ol.order_header_key
+      LEFT JOIN yfs_order_release orel ON ol.order_line_key = orel.order_line_key
+      LEFT JOIN yfs_shipment_line sl ON ol.order_line_key = sl.order_line_key
+      LEFT JOIN yfs_shipment s ON sl.shipment_key = s.shipment_key
+      WHERE o.order_no = :order_no
+        AND o.enterprise_key = :enterprise_key
+      GROUP BY o.order_no, o.order_date, o.customer_emailid, o.payment_status, o.total_amount
+  
+  shipment_validation:
+    description: "Validate shipment readiness for confirmation"
+    purpose: "Check BR003 prerequisites"
+    sql: |
+      SELECT 
+        s.shipment_no,
+        s.status,
+        COUNT(DISTINCT sl.shipment_line_key) as line_count,
+        COUNT(DISTINCT sc.shipment_container_key) as container_count,
+        SUM(sl.quantity) as total_line_qty,
+        CASE 
+          WHEN COUNT(DISTINCT sl.shipment_line_key) = 0 THEN 'FAIL: No lines'
+          WHEN COUNT(DISTINCT sc.shipment_container_key) = 0 THEN 'FAIL: No containers'
+          ELSE 'PASS'
+        END as validation_status
+      FROM yfs_shipment s
+      LEFT JOIN yfs_shipment_line sl ON s.shipment_key = sl.shipment_key
+      LEFT JOIN yfs_shipment_container sc ON s.shipment_key = sc.shipment_key
+      WHERE TRIM(s.shipment_no) = :shipment_no
+      GROUP BY s.shipment_no, s.status
+  
+  causal_chain_temporal:
+    description: "Find temporally related exceptions"
+    purpose: "Build causal chain for RCA"
+    sql: |
+      SELECT 
+        e2.errortxnid,
+        e2.flow_name,
+        e2.errorcode,
+        e2.errorstring,
+        e2.createts,
+        (CAST(e1.createts AS DATE) - CAST(e2.createts AS DATE)) * 24 * 60 as minutes_before
+      FROM yfs_reprocess_error e1
+      JOIN yfs_reprocess_error e2 
+        ON e1.error_reference = e2.error_reference
+        AND e1.errortxnid != e2.errortxnid
+        AND e2.createts < e1.createts
+        AND e2.createts >= e1.createts - INTERVAL '1' HOUR
+      WHERE e1.errortxnid = :exception_id
+      ORDER BY e2.createts DESC
+
+# ============================================
+# VALIDATION CONSTRAINTS
+# ============================================
+
+validation_constraints:
+  
+  - name: "Multi-tenancy filter required"
+    rule: "All queries joining yfs_order_header MUST include enterprise_key filter"
+    severity: critical
+    validation_logic: "if 'yfs_order_header' in tables and 'enterprise_key' not in where_clause: REJECT"
+  
+  - name: "Shipment number trimming"
+    rule: "All comparisons with shipment_no MUST use TRIM() function"
+    severity: medium
+    validation_logic: "if comparing shipment_no without TRIM(): WARN"
+  
+  - name: "JSON extraction safety"
+    rule: "MESSAGE parsing must validate JSON structure before extraction"
+    severity: high
+    validation_logic: "if using JSON_VALUE without try-catch: WARN"
+  
+  - name: "Causal chain depth limit"
+    rule: "Recursive causal queries limited to 3 levels"
+    severity: medium
+    validation_logic: "if recursive query depth > 3: REJECT"
+  
+  - name: "Exception state filter"
+    rule: "RCA generation only for state IN ('Initial', 'Saved')"
+    severity: low
+    validation_logic: "if processing exception with state = 'Fixed' or 'Ignore': SKIP"
+
+# ============================================
+# END OF ONTOLOGY
+# ============================================
+# 
+# For training notes, extension mechanism, and developer documentation,
+# see: orderguard_ontology_metadata.yaml
+# ============================================
+

@@ -1,0 +1,16 @@
+# Frontend-specific patterns (common patterns handled by root .gitignore)
+# This file extends the root .gitignore with Next.js specifics
+
+# Next.js
+.next/
+out/
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Test coverage (frontend-specific)
+coverage/
+
+# Local environment overrides (if needed beyond root .gitignore)
+# .env.local is already in root .gitignore
