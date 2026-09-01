@@ -1,6 +1,6 @@
 # Surface
 
-Tastemaker is an order management and inventory intelligence platform powered by Plantrix. It provides real-time fulfillment health monitoring, order tracking, and inventory diagnostics through a modern web interface backed by a Model Context Protocol (MCP) server.
+Surface is an order management and inventory intelligence platform powered by Plantrix. It provides real-time fulfillment health monitoring, order tracking, and inventory diagnostics through a modern web interface backed by a Model Context Protocol (MCP) server.
 
 ## Project Structure
 
